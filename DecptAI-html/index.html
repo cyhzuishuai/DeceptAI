@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多人对话游戏</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+    <h1>多人对话游戏</h1>
+    <div id="chat-box">
+        <div id="messages"></div>
+        <div class="input-group">
+            <input type="text" id="message-input" placeholder="输入消息..." disabled />
+            <button id="send-button" disabled>发送</button>
+        </div>
+        <button id="match-button">开始匹配</button>
+    </div>
+    <div id="status">未连接</div>
+    <button id="logout-btn" style="display: none;">退出登录</button>
+
+    <script src="js/app.js"></script>
+</body>
+
+</html>
