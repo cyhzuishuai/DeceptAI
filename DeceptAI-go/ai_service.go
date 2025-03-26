@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 )
 
 // AIService 提供AI交互功能
@@ -16,16 +15,20 @@ type AIService struct {
 
 // NewAIService 创建AI服务实例
 func NewAIService() *AIService {
+	apiKey := "sk-83538549b1914523b7c8ed34620a6cd3"
+	apiURL := "https://api.deepseek.com/v1/chat/completions"
+
 	return &AIService{
-		apiKey: os.Getenv("DEEPSEEK_API_KEY"),
-		apiURL: os.Getenv("DEEPSEEK_API_URL"),
+		apiKey: apiKey,
+		apiURL: apiURL,
 	}
 }
 
 // AIRequest DeepSeek API请求结构
 type AIRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Temperature float64   `json:"temperature,omitempty"`
 }
 
 // Message 聊天消息结构
@@ -51,6 +54,7 @@ func (ai *AIService) GetAIResponse(prompt string) (string, error) {
 				Content: prompt,
 			},
 		},
+		Temperature: 0.7, // 增加随机性
 	}
 
 	requestBody, err := json.Marshal(request)

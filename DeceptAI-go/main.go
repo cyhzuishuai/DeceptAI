@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +37,8 @@ type MatchMaker struct {
 	MimicQueue   chan *Player     // 模仿者队列
 	Rooms        map[string]*Room // 所有房间
 	Mutex        sync.RWMutex     // 读写锁
+	AIService    *AIService       // AI服务
+	AIMatchRate  int              // AI匹配概率(百分比)
 }
 
 // Room 表示游戏房间
@@ -49,6 +53,8 @@ func main() {
 		GuesserQueue: make(chan *Player, 1000),
 		MimicQueue:   make(chan *Player, 1000),
 		Rooms:        make(map[string]*Room),
+		AIService:    NewAIService(),
+		AIMatchRate:  50, // 默认30%概率匹配AI
 	}
 
 	// 启动匹配协程
@@ -91,10 +97,43 @@ func (mm *MatchMaker) StartMatching() {
 			case mimic := <-mm.MimicQueue:
 				log.Printf("模仿者 %s 进入队列", mimic.Username)
 
-				// 随机决定房间类型 (0: 玩家vsAI, 1: 玩家vs玩家)
-				roomType := time.Now().UnixNano() % 2
+				// 根据权重决定是否匹配AI
+				randNum, err := rand.Int(rand.Reader, big.NewInt(100))
+				if err != nil {
+					log.Printf("生成随机数失败: %v", err)
+					randNum = big.NewInt(0)
+				}
+				fmt.Printf("随机数: %d, AI匹配率: %d", randNum.Int64(), mm.AIMatchRate)
+				if randNum.Int64() < int64(mm.AIMatchRate) {
+					// 创建AI房间
+					roomID := generateRoomID()
+					aiPlayer := &Player{
+						Username: "AI",
+						Send:     make(chan []byte, 256),
+					}
+					room := &Room{
+						Players: [2]*Player{guesser, aiPlayer},
+						Created: time.Now(),
+					}
 
-				// 创建新房间
+					// 加锁更新房间信息
+					mm.Mutex.Lock()
+					mm.Rooms[roomID] = room
+					mm.Mutex.Unlock()
+
+					// 设置玩家房间ID
+					guesser.RoomID = roomID
+
+					// 通知猜测者匹配成功(0表示AI房间)
+					guesser.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|0", roomID))
+					log.Printf("AI房间 %s 创建成功", roomID)
+
+					// 模仿者继续留在队列等待
+					mm.MimicQueue <- mimic
+					continue
+				}
+
+				// 创建玩家房间
 				roomID := generateRoomID()
 				room := &Room{
 					Players: [2]*Player{guesser, mimic},
@@ -110,10 +149,10 @@ func (mm *MatchMaker) StartMatching() {
 				guesser.RoomID = roomID
 				mimic.RoomID = roomID
 
-				// 通知双方匹配成功和房间类型
-				guesser.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|%d", roomID, roomType))
-				mimic.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|%d", roomID, roomType))
-				log.Printf("房间 %s 创建成功 (类型: %d)", roomID, roomType)
+				// 通知双方匹配成功(1表示玩家房间)
+				guesser.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|1", roomID))
+				mimic.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|1", roomID))
+				log.Printf("玩家房间 %s 创建成功", roomID)
 
 			case <-time.After(30 * time.Second):
 				// 匹配超时处理
@@ -129,10 +168,43 @@ func (mm *MatchMaker) StartMatching() {
 			case guesser := <-mm.GuesserQueue:
 				log.Printf("猜测者 %s 进入队列", guesser.Username)
 
-				// 随机决定房间类型 (0: 玩家vsAI, 1: 玩家vs玩家)
-				roomType := time.Now().UnixNano() % 2
+				// 根据权重决定是否匹配AI
+				randNum, err := rand.Int(rand.Reader, big.NewInt(100))
+				if err != nil {
+					log.Printf("生成随机数失败: %v", err)
+					randNum = big.NewInt(0)
+				}
+				fmt.Printf("随机数: %d, AI匹配率: %d\n", randNum.Int64(), mm.AIMatchRate)
+				if randNum.Int64() < int64(mm.AIMatchRate) {
+					// 创建AI房间
+					roomID := generateRoomID()
+					aiPlayer := &Player{
+						Username: "AI",
+						Send:     make(chan []byte, 256),
+					}
+					room := &Room{
+						Players: [2]*Player{guesser, aiPlayer},
+						Created: time.Now(),
+					}
 
-				// 创建新房间
+					// 加锁更新房间信息
+					mm.Mutex.Lock()
+					mm.Rooms[roomID] = room
+					mm.Mutex.Unlock()
+
+					// 设置玩家房间ID
+					guesser.RoomID = roomID
+
+					// 通知猜测者匹配成功(0表示AI房间)
+					guesser.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|0", roomID))
+					log.Printf("AI房间 %s 创建成功", roomID)
+
+					// 模仿者继续留在队列等待
+					mm.MimicQueue <- mimic
+					continue
+				}
+
+				// 创建玩家房间
 				roomID := generateRoomID()
 				room := &Room{
 					Players: [2]*Player{guesser, mimic},
@@ -148,10 +220,10 @@ func (mm *MatchMaker) StartMatching() {
 				guesser.RoomID = roomID
 				mimic.RoomID = roomID
 
-				// 通知双方匹配成功和房间类型
-				guesser.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|%d", roomID, roomType))
-				mimic.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|%d", roomID, roomType))
-				log.Printf("房间 %s 创建成功 (类型: %d)", roomID, roomType)
+				// 通知双方匹配成功(1表示玩家房间)
+				guesser.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|1", roomID))
+				mimic.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|1", roomID))
+				log.Printf("玩家房间 %s 创建成功", roomID)
 
 			case <-time.After(30 * time.Second):
 				// 匹配超时处理
@@ -180,7 +252,7 @@ func (p *Player) ReadPump(mm *MatchMaker) {
 		// 读取消息
 		_, message, err := p.Conn.ReadMessage()
 		if message != nil {
-			fmt.Printf("收到原始消息: %v\n", message)
+			//fmt.Printf("收到原始消息: %v\n", message)
 			fmt.Printf("消息字符串: %s\n", string(message))
 		}
 		if err != nil {
@@ -224,22 +296,47 @@ func (p *Player) ReadPump(mm *MatchMaker) {
 			}
 
 		case p.RoomID != "":
-			// 转发消息到房间
+			// 处理房间内消息
 			mm.Mutex.RLock()
 			room := mm.Rooms[p.RoomID]
 			mm.Mutex.RUnlock()
 
 			if room != nil {
-				// 找到另一个玩家
-				var target *Player
-				if p == room.Players[0] {
-					target = room.Players[1]
+				// 获取房间类型 (0:AI, 1:玩家)
+				roomType := 0
+				if room.Players[1].Username == "AI" {
+					roomType = 0
 				} else {
-					target = room.Players[0]
+					roomType = 1
 				}
 
-				if target != nil {
-					target.Send <- message
+				if roomType == 0 { // AI房间
+					// 获取玩家消息内容
+					msgParts := strings.Split(string(message), "|")
+					if len(msgParts) >= 2 {
+						content := msgParts[1]
+						// 异步获取AI回复
+						go func() {
+							aiResponse, err := mm.AIService.GetAIResponse(content)
+							if err != nil {
+								log.Printf("获取AI回复失败: %v", err)
+								return
+							}
+							// 发送AI回复
+							room.Players[0].Send <- []byte(fmt.Sprintf("AI|%s", aiResponse))
+						}()
+					}
+				} else { // 玩家房间
+					// 转发消息给另一个玩家
+					var target *Player
+					if p == room.Players[0] {
+						target = room.Players[1]
+					} else {
+						target = room.Players[0]
+					}
+					if target != nil {
+						target.Send <- message
+					}
 				}
 			}
 		}
