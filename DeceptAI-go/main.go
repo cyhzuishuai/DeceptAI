@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -30,22 +31,24 @@ type Player struct {
 
 // MatchMaker 管理匹配系统
 type MatchMaker struct {
-	Queue    chan *Player       // 匹配队列
-	Rooms    map[string]*Room   // 所有房间
-	Mutex    sync.RWMutex       // 读写锁
+	GuesserQueue chan *Player     // 猜测者队列
+	MimicQueue   chan *Player     // 模仿者队列
+	Rooms        map[string]*Room // 所有房间
+	Mutex        sync.RWMutex     // 读写锁
 }
 
 // Room 表示游戏房间
 type Room struct {
-	Players [2]*Player  // 房间内的两个玩家
-	Created time.Time   // 创建时间
+	Players [2]*Player // 房间内的两个玩家
+	Created time.Time  // 创建时间
 }
 
 func main() {
 	// 初始化匹配系统
 	matchMaker := &MatchMaker{
-		Queue: make(chan *Player, 1000),
-		Rooms: make(map[string]*Room),
+		GuesserQueue: make(chan *Player, 1000),
+		MimicQueue:   make(chan *Player, 1000),
+		Rooms:        make(map[string]*Room),
 	}
 
 	// 启动匹配协程
@@ -78,38 +81,83 @@ func main() {
 // StartMatching 匹配系统核心逻辑
 func (mm *MatchMaker) StartMatching() {
 	for {
-		// 从队列获取第一个玩家
-		player1 := <-mm.Queue
-		log.Printf("玩家 %s 进入队列", player1.Username)
-
-		// 等待第二个玩家（最多30秒）
+		// 等待两个队列都有玩家
 		select {
-		case player2 := <-mm.Queue:
-			// 创建新房间
-			roomID := generateRoomID()
-			room := &Room{
-				Players: [2]*Player{player1, player2},
-				Created: time.Now(),
+		case guesser := <-mm.GuesserQueue:
+			log.Printf("猜测者 %s 进入队列", guesser.Username)
+
+			// 等待模仿者（最多30秒）
+			select {
+			case mimic := <-mm.MimicQueue:
+				log.Printf("模仿者 %s 进入队列", mimic.Username)
+
+				// 随机决定房间类型 (0: 玩家vsAI, 1: 玩家vs玩家)
+				roomType := time.Now().UnixNano() % 2
+
+				// 创建新房间
+				roomID := generateRoomID()
+				room := &Room{
+					Players: [2]*Player{guesser, mimic},
+					Created: time.Now(),
+				}
+
+				// 加锁更新房间信息
+				mm.Mutex.Lock()
+				mm.Rooms[roomID] = room
+				mm.Mutex.Unlock()
+
+				// 设置玩家房间ID
+				guesser.RoomID = roomID
+				mimic.RoomID = roomID
+
+				// 通知双方匹配成功和房间类型
+				guesser.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|%d", roomID, roomType))
+				mimic.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|%d", roomID, roomType))
+				log.Printf("房间 %s 创建成功 (类型: %d)", roomID, roomType)
+
+			case <-time.After(30 * time.Second):
+				// 匹配超时处理
+				guesser.Send <- []byte("MATCH_TIMEOUT")
+				log.Printf("猜测者 %s 匹配超时", guesser.Username)
 			}
 
-			// 加锁更新房间信息
-			mm.Mutex.Lock()
-			mm.Rooms[roomID] = room
-			mm.Mutex.Unlock()
+		case mimic := <-mm.MimicQueue:
+			log.Printf("模仿者 %s 进入队列", mimic.Username)
 
-			// 设置玩家房间ID
-			player1.RoomID = roomID
-			player2.RoomID = roomID
+			// 等待猜测者（最多30秒）
+			select {
+			case guesser := <-mm.GuesserQueue:
+				log.Printf("猜测者 %s 进入队列", guesser.Username)
 
-			// 通知双方匹配成功
-			player1.Send <- []byte("MATCH_SUCCESS|" + roomID)
-			player2.Send <- []byte("MATCH_SUCCESS|" + roomID)
-			log.Printf("房间 %s 创建成功", roomID)
+				// 随机决定房间类型 (0: 玩家vsAI, 1: 玩家vs玩家)
+				roomType := time.Now().UnixNano() % 2
 
-		case <-time.After(30 * time.Second):
-			// 匹配超时处理
-			player1.Send <- []byte("MATCH_TIMEOUT")
-			log.Printf("玩家 %s 匹配超时", player1.Username)
+				// 创建新房间
+				roomID := generateRoomID()
+				room := &Room{
+					Players: [2]*Player{guesser, mimic},
+					Created: time.Now(),
+				}
+
+				// 加锁更新房间信息
+				mm.Mutex.Lock()
+				mm.Rooms[roomID] = room
+				mm.Mutex.Unlock()
+
+				// 设置玩家房间ID
+				guesser.RoomID = roomID
+				mimic.RoomID = roomID
+
+				// 通知双方匹配成功和房间类型
+				guesser.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|%d", roomID, roomType))
+				mimic.Send <- []byte(fmt.Sprintf("MATCH_SUCCESS|%s|%d", roomID, roomType))
+				log.Printf("房间 %s 创建成功 (类型: %d)", roomID, roomType)
+
+			case <-time.After(30 * time.Second):
+				// 匹配超时处理
+				mimic.Send <- []byte("MATCH_TIMEOUT")
+				log.Printf("模仿者 %s 匹配超时", mimic.Username)
+			}
 		}
 	}
 }
@@ -131,6 +179,10 @@ func (p *Player) ReadPump(mm *MatchMaker) {
 	for {
 		// 读取消息
 		_, message, err := p.Conn.ReadMessage()
+		if message != nil {
+			fmt.Printf("收到原始消息: %v\n", message)
+			fmt.Printf("消息字符串: %s\n", string(message))
+		}
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
 				log.Printf("玩家 %s 异常断开: %v", p.Username, err)
@@ -142,18 +194,35 @@ func (p *Player) ReadPump(mm *MatchMaker) {
 		switch {
 		case string(message) == "PING":
 			p.Send <- []byte("PONG")
-			
+
 		case string(message[:12]) == "SET_USERNAME":
 			p.Username = string(message[13:])
-			
-		case string(message) == "REQUEST_MATCH":
-			select {
-			case mm.Queue <- p:
-				p.Send <- []byte("MATCH_QUEUED")
+
+		case len(message) >= 12 && string(message[:13]) == "REQUEST_MATCH":
+			fmt.Println("进入REQUEST_MATCH处理分支")
+			role := string(message[14:])
+			fmt.Printf("角色: %s\n", role)
+			switch role {
+			case "GUESSER":
+				fmt.Println("处理GUESSER角色")
+				select {
+				case mm.GuesserQueue <- p:
+					fmt.Println("成功加入猜测者队列")
+					p.Send <- []byte("MATCH_QUEUED|GUESSER")
+				default:
+					p.Send <- []byte("MATCH_QUEUE_FULL")
+				}
+			case "MIMIC":
+				select {
+				case mm.MimicQueue <- p:
+					p.Send <- []byte("MATCH_QUEUED|MIMIC")
+				default:
+					p.Send <- []byte("MATCH_QUEUE_FULL")
+				}
 			default:
-				p.Send <- []byte("MATCH_QUEUE_FULL")
+				p.Send <- []byte("INVALID_ROLE")
 			}
-			
+
 		case p.RoomID != "":
 			// 转发消息到房间
 			mm.Mutex.RLock()
@@ -199,7 +268,7 @@ func (p *Player) WritePump() {
 				log.Printf("发送消息失败: %v", err)
 				return
 			}
-			
+
 		case <-ticker.C:
 			// 发送心跳包
 			if err := p.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -214,7 +283,7 @@ func (mm *MatchMaker) RemovePlayer(p *Player) {
 	if p.RoomID != "" {
 		mm.Mutex.Lock()
 		defer mm.Mutex.Unlock()
-		
+
 		if room, exists := mm.Rooms[p.RoomID]; exists {
 			// 找到玩家索引
 			index := -1
@@ -224,14 +293,14 @@ func (mm *MatchMaker) RemovePlayer(p *Player) {
 					break
 				}
 			}
-			
+
 			if index != -1 {
 				// 通知另一个玩家
 				otherPlayer := room.Players[1-index]
 				if otherPlayer != nil {
 					otherPlayer.Send <- []byte("PLAYER_DISCONNECTED")
 				}
-				
+
 				// 清理房间
 				delete(mm.Rooms, p.RoomID)
 				log.Printf("房间 %s 已清理", p.RoomID)
